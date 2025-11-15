@@ -1,0 +1,5 @@
+Use the Visual Studio 2022 Developer Command Prompt, 64 bit.
+
+Run `build_win32_release.bat`.
+
+To build for debug: `build_win32.bat`. The debug build uses address sanitisation to detect memory errors. You need to link to the appropriate library for this to work: `clang_rt.asan_dynamic-x86_64.dll`.
