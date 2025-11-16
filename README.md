@@ -1,6 +1,6 @@
 # TAMdbg
 
-<img width="1284" height="808" alt="Screenshot 2025-11-15 192054" src="https://github.com/user-attachments/assets/d09d2d2d-2ce4-4191-bfe5-edcd51085f71" />
+<img width="1287" height="815" alt="Screenshot 2025-11-16 073946" src="https://github.com/user-attachments/assets/e624619a-c662-4a2d-9cbf-9e2b64f3808d" />
 
 ## Build
 Currently only Windows is supported using Win32 API and DirectX11.
