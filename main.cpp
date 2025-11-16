@@ -34,12 +34,13 @@ namespace fs = std::filesystem;
 #include "tam/error.h"
 
 // Data
-static ID3D11Device*            g_pd3dDevice = nullptr;
-static ID3D11DeviceContext*     g_pd3dDeviceContext = nullptr;
-static IDXGISwapChain*          g_pSwapChain = nullptr;
-static bool                     g_SwapChainOccluded = false;
-static UINT                     g_ResizeWidth = 0, g_ResizeHeight = 0;
-static ID3D11RenderTargetView*  g_mainRenderTargetView = nullptr;
+static ID3D11Device*           g_pd3dDevice           = nullptr;
+static ID3D11DeviceContext*    g_pd3dDeviceContext    = nullptr;
+static IDXGISwapChain*         g_pSwapChain           = nullptr;
+static bool                    g_SwapChainOccluded    = false;
+static UINT                    g_ResizeWidth          = 0;
+static UINT                    g_ResizeHeight         = 0;
+static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
 // Forward declarations of helper functions
 bool CreateDeviceD3D(HWND hWnd);
@@ -47,20 +48,33 @@ void CleanupDeviceD3D();
 void CreateRenderTarget();
 void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+std::wstring SelectFileDialog(HWND);
 
 BOOL SetDarkModeTitleBar(HWND hwnd, BOOL enable);
 
-// Muh globals =========================
+// App globals =========================
 
 bool g_Resizing = false;
-std::string g_current_filename;
+std::string g_current_filename = "";
 std::vector<uint32_t> g_current_program;
+bool* breakpoints;
+
+const char *stopped_due_to_exception = "";
+std::vector<std::string> exceptions;
 
 tam::TamEmulator emulator;
 std::array<tam::TamAddr, 16> g_prev_registers = emulator.registers;
 std::vector<std::string> mnemonics;
 
 bool pref_highlight_changed_registers = true;
+bool pref_suspend_on_error            = true;
+
+HANDLE mutex_emulator = CreateMutexA(NULL, false, "MutexEmulator");
+bool   run_emulator = false;
+
+DWORD WINAPI thread_func_run_emulator(LPVOID param);
+HANDLE thread_run_emulator = CreateThread(NULL, 0, thread_func_run_emulator, NULL, 0, NULL);
+HANDLE sem_kick_the_emulator;
 
 // =====================================
 
@@ -84,8 +98,8 @@ std::wstring SelectFileDialog(HWND owner = NULL) {
     if (SUCCEEDED(hr)) {
         // Optional: set file filters
         COMDLG_FILTERSPEC filterSpecs[] = {
-            { L"All Files (*.*)", L"*.*" },
-            //{ L"Text Files (*.txt)", L"*.txt" }
+            { L"TAM Binary (*.tam-binary)", L"*.tam-binary" },
+            { L"All Files (*.*)", L"*.*" }
         };
         pFileDialog->SetFileTypes(ARRAYSIZE(filterSpecs), filterSpecs);
         pFileDialog->SetFileTypeIndex(1);
@@ -153,9 +167,18 @@ std::vector<uint32_t> ReadProgramFromFile(const std::string& filename) {
 
 void StartSession(std::string filename) {
     try {
-        g_current_program = ReadProgramFromFile(filename);
+        g_current_program  = ReadProgramFromFile(filename);
+        g_current_filename = filename;
+
+        DWORD wait = WaitForSingleObject(mutex_emulator, INFINITE);
+        assert(wait == WAIT_OBJECT_0);
+
         emulator = tam::TamEmulator();
         emulator.LoadProgram(g_current_program);
+        breakpoints = new bool[g_current_program.size()]();
+
+        assert(ReleaseMutex(mutex_emulator));
+
         g_prev_registers = emulator.registers;
         mnemonics.clear();
         for (uint32_t code : g_current_program) {
@@ -170,34 +193,48 @@ void StartSession(std::string filename) {
             mnemonics.push_back(tam::GetMnemonic(ins));
         }
     } catch (const std::exception& e) {
-        std::cerr << e.what() << std::endl; // @Robustness
+        std::cerr << e.what() << std::endl; // @ToDo tell the user this
         //return 2;
     }
 }
 
 void RestartSession() {
+    DWORD wait = WaitForSingleObject(mutex_emulator, INFINITE);
+    assert(wait == WAIT_OBJECT_0);
+
     emulator = tam::TamEmulator();
     emulator.LoadProgram(g_current_program);
+
+    exceptions.clear();
+    stopped_due_to_exception = "";
+
+    assert(ReleaseMutex(mutex_emulator));
+
     g_prev_registers = emulator.registers;
 }
 
-/*
+void Step() {
+    try {
+        const tam::TamInstruction Instr = emulator.FetchDecode();
+        emulator.Execute(Instr);
+        stopped_due_to_exception = "";
+    } catch (const std::exception& e) {
+        stopped_due_to_exception = strdup(e.what());
 
-    bool running = true;
-    do {
-        try {
-            running = CpuCycle(emulator, args->trace, args->step);
-        } catch (const std::exception& e) {
-            std::cerr << e.what() << std::endl;
-            return 3;
-        }
-    } while (running);
-    return 0;
-    */
+        if (pref_suspend_on_error)
+            run_emulator = false;
+
+        exceptions.push_back(e.what());
+
+        std::cerr << e.what() << std::endl;
+    }
+}
 
 // Main code
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
+    sem_kick_the_emulator = CreateSemaphore(NULL, 0, 1, NULL);
+
     // Create application window
     //ImGui_ImplWin32_EnableDpiAwareness();
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"TAMdbg", nullptr };
@@ -295,6 +332,10 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                         //MessageBoxW(NULL, L"No folder selected or dialog canceled.", L"Info", MB_OK | MB_ICONEXCLAMATION);
                     }
                 }
+                if (ImGui::MenuItem("Reload")) {
+                    // @Todo this removes breakpoints
+                    StartSession(g_current_filename);
+                }
                 // ShowExampleMenuFile();
                 //if (ImGui::MenuItem("Undo", "CTRL+Z")) {}
                 //if (ImGui::MenuItem("Redo", "CTRL+Y", false, false)) {} // Disabled item
@@ -314,15 +355,49 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             }
             if (ImGui::BeginMenu("Preferences")) {
                 ImGui::Checkbox("Highlight Changed Registers", &pref_highlight_changed_registers);
+                ImGui::Checkbox("Suspend on Error", &pref_suspend_on_error);
                 ImGui::EndMenu();
             }
+
+            // --- Draw the colored rect in the remaining area ---
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+            // Current cursor (end of menu items)
+            ImVec2 p = ImGui::GetCursorScreenPos();
+
+            // End of the menu bar
+            ImVec2 end = ImGui::GetWindowPos();
+            end.x     += ImGui::GetWindowWidth();
+            end.y     += ImGui::GetWindowHeight();
+
+            ImU32 colour_running   = IM_COL32(202,  81,  0, 255);
+            ImU32 colour_suspended = IM_COL32(202, 131,  0, 255);
+            ImU32 colour_success   = IM_COL32( 40, 202,  0, 255);
+            ImU32 colour_error     = IM_COL32(137,  11, 11, 255);
+
+            // Status
+            if (emulator.halted) {
+                draw_list->AddRectFilled(p, end, colour_success);
+                ImGui::Text("   Program halted");
+            } else if (run_emulator) {
+                draw_list->AddRectFilled(p, end, colour_running);
+                ImGui::Text("   Executing");
+            } else if (std::strlen(stopped_due_to_exception) > 0) {
+                draw_list->AddRectFilled(p, end, colour_error);
+                ImGui::Text("   Suspended: %s", stopped_due_to_exception);
+            } else if (g_current_filename != "") {
+                draw_list->AddRectFilled(p, end, colour_suspended);
+                ImGui::Text("   Suspended");
+            }
+
             ImGui::EndMainMenuBar();
         }
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
         ImGui::Begin("Disassembly");
+        ImGui::PopStyleVar();
 
-        if (ImGui::BeginTable("MyTable", 2,
+        if (ImGui::BeginTable("DisassemblyTable", 2,
                                             ImGuiTableFlags_Borders |
                                             //ImGuiTableFlags_RowBg |
                                             ImGuiTableFlags_Resizable |
@@ -333,22 +408,49 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                                             ImGuiTableFlags_SizingFixedFit
                                             )) {
             ImGui::TableSetupScrollFreeze(0, 1);
+
             ImGui::TableSetupColumn("LOC");
             ImGui::TableSetupColumn("Instruction");
+
             ImGui::TableHeadersRow();
 
             ImGuiListClipper clipper;
             clipper.Begin(mnemonics.size());
+
+            int hovered_row = ImGui::TableGetHoveredRow();
+            static int select_hovered_row = -1;
+
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && hovered_row != -1) {
+                ImGui::OpenPopup("my_toggle_popup");
+                select_hovered_row = hovered_row - 1;
+                    //breakpoints[hovered_row - 1] = !breakpoints[hovered_row - 1];
+            }
+
+            if (ImGui::BeginPopup("my_toggle_popup")) {
+                ImGui::MenuItem("Breakpoint", "", &breakpoints[select_hovered_row]);
+                if (ImGui::MenuItem("Set Execution Point")) {
+                    emulator.registers[tam::CP] = select_hovered_row;
+                    emulator.halted = false;
+                }
+
+                ImGui::EndPopup();
+            }
+
             while (clipper.Step()) {
                 for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
                     std::string mnemonic = mnemonics[row];
                     ImGui::TableNextRow();
 
+                    // Draw Breakpoint
+                    if (breakpoints[row]) {
+                        ImU32 breakpoint_colour = IM_COL32(170, 51, 79, 255);
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, breakpoint_colour);
+                    }
+
+                    // Draw Program Counter Instruction
                     if (row == emulator.registers[tam::CP]) {
-                        ImVec4 breakpoint_colour = ImVec4(0.250f, 0.145f, 0.168f, 1.0f);
-                        ImVec4 step_colour       = ImVec4(0.200f, 0.411f, 0.678f, 1.0f);
-                        ImU32 row_bg_colour      = ImGui::GetColorU32(step_colour);
-                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, row_bg_colour);
+                        ImU32 step_colour = IM_COL32(41, 105, 173, 255);
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, step_colour);
                     }
 
                     ImGui::TableNextColumn();
@@ -358,23 +460,41 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                     //ImGui::Selectable(a.c_str(), &matched_lines[row].selected, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, 10));
                 }
             }
+
             ImGui::EndTable();
         }
 
         ImGui::End();
-        ImGui::PopStyleVar();
 
         ImGui::Begin("Output");
         ImGui::Text("%s", emulator.output.c_str());
         ImGui::End();
 
+        ImGui::Begin("Errors");
+        for (std::string error : exceptions)
+            ImGui::Text("%s", error.c_str());
+        ImGui::End();
+
         ImGui::Begin("Stack");
         bool instructions_left = emulator.registers[tam::CP] < emulator.registers[tam::CT];
-        ImGui::BeginDisabled(!emulator.running || !instructions_left);
+        ImGui::BeginDisabled(run_emulator);
+        if (ImGui::Button("Run")) {
+            if (emulator.halted || !instructions_left)
+                RestartSession();
+            ReleaseSemaphore(sem_kick_the_emulator, 1, NULL);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!run_emulator);
+        if (ImGui::Button("Stop")) {
+            run_emulator = false;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(emulator.halted || !instructions_left || run_emulator);
         if (ImGui::Button("Step")) {
             g_prev_registers = emulator.registers;
-            const tam::TamInstruction Instr = emulator.FetchDecode();
-            emulator.Execute(Instr);
+            Step();
         }
         ImGui::EndDisabled();
 
@@ -410,7 +530,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                                             ImGuiTableFlags_Borders |
                                             ImGuiTableFlags_RowBg |
                                             //ImGuiTableFlags_Resizable |
-                                            ImGuiTableFlags_NoPadOuterX |
                                             // ImGuiTableFlags_Reorderable |
                                             ImGuiTableFlags_ScrollY |
                                             ImGuiTableFlags_ScrollX |
@@ -428,6 +547,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                 else
                     ImGui::Text("%d", emulator.registers[r]);
             }
+
             ImGui::EndTable();
         }
 
@@ -448,8 +568,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         }
 
         // Present
-        HRESULT hr = g_pSwapChain->Present(1, 0);   // Present with vsync
-        //HRESULT hr = g_pSwapChain->Present(0, 0); // Present without vsync
+        bool vsync = true;
+        HRESULT hr = g_pSwapChain->Present(vsync, 0);
+
         g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
     }
 
@@ -465,24 +586,53 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     return 0;
 }
 
+DWORD WINAPI thread_func_run_emulator(LPVOID param) {
+    while (true) {
+        DWORD wait = WaitForSingleObject(mutex_emulator, INFINITE);
+        assert(wait == WAIT_OBJECT_0);
+
+        if (emulator.halted)
+            run_emulator = false;
+
+        bool instructions_left = emulator.registers[tam::CP] < emulator.registers[tam::CT];
+        if (instructions_left) {
+            bool breakpoint = breakpoints[emulator.registers[tam::CP]];
+            if (breakpoint)
+                run_emulator = false;
+        }
+
+        assert(ReleaseMutex(mutex_emulator));
+
+        if (run_emulator) {
+            Step();
+        } else {
+            WaitForSingleObject(sem_kick_the_emulator, INFINITE);
+            run_emulator = true;
+            Step(); // Do this so we don't get hung up on breakpoints forever
+        }
+    }
+
+    return 0;
+}
+
 // Helper functions
 bool CreateDeviceD3D(HWND hWnd)
 {
     // Setup swap chain
     DXGI_SWAP_CHAIN_DESC sd;
     ZeroMemory(&sd, sizeof(sd));
-    sd.BufferCount = 2;
-    sd.BufferDesc.Width = 0;
+    sd.BufferCount       = 2;
+    sd.BufferDesc.Width  = 0;
     sd.BufferDesc.Height = 0;
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    sd.BufferDesc.RefreshRate.Numerator = 60;
+    sd.BufferDesc.RefreshRate.Numerator   = 60;
     sd.BufferDesc.RefreshRate.Denominator = 1;
-    sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.Flags        = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.BufferUsage  = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.OutputWindow = hWnd;
-    sd.SampleDesc.Count = 1;
+    sd.SampleDesc.Count   = 1;
     sd.SampleDesc.Quality = 0;
-    sd.Windowed = TRUE;
+    sd.Windowed   = TRUE;
     sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
     UINT createDeviceFlags = 0;
@@ -502,9 +652,18 @@ bool CreateDeviceD3D(HWND hWnd)
 void CleanupDeviceD3D()
 {
     CleanupRenderTarget();
-    if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
-    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
-    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
+    if (g_pSwapChain) {
+        g_pSwapChain->Release();
+        g_pSwapChain = nullptr;
+    }
+    if (g_pd3dDeviceContext) {
+        g_pd3dDeviceContext->Release();
+        g_pd3dDeviceContext = nullptr;
+    }
+    if (g_pd3dDevice) {
+        g_pd3dDevice->Release();
+        g_pd3dDevice = nullptr;
+    }
 }
 
 void CreateRenderTarget()
@@ -517,7 +676,10 @@ void CreateRenderTarget()
 
 void CleanupRenderTarget()
 {
-    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
+    if (g_mainRenderTargetView) {
+        g_mainRenderTargetView->Release();
+        g_mainRenderTargetView = nullptr;
+    }
 }
 
 #ifndef WM_DPICHANGED

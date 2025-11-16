@@ -149,7 +149,7 @@ void TamEmulator::Execute(TamInstruction instr) {
             this->ExecuteJumpif(instr);
             break;
         case HALT:
-            this->running = false;
+            this->halted = true;
             break;
         default:
             throw RuntimeError(ExceptionKind::kUnknownOpcode,

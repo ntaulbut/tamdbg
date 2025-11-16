@@ -56,8 +56,7 @@ const std::runtime_error RuntimeError(ExceptionKind kind, uint16_t addr) {
             break;
     }
 
-    ss << ": error at loc " << std::hex << std::setw(4) << std::setfill('0')
-       << addr;
+    ss << " at loc " << addr;
 
     return std::runtime_error(ss.str());
 }

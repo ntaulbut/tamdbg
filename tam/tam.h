@@ -309,7 +309,7 @@ class TamEmulator {
     FILE *instream,  ///< File that input is read from
         *outstream;  ///< File that output is written to
 
-    bool running = true;
+    bool halted = false;
 
     std::string output;
 };
