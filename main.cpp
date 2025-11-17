@@ -56,15 +56,14 @@ BOOL SetDarkModeTitleBar(HWND hwnd, BOOL enable);
 
 bool g_Resizing = false;
 std::string g_current_filename = "";
-std::vector<uint32_t> g_current_program;
-bool* breakpoints;
+std::vector<tam::TamInstruction> g_current_program;
+bool* breakpoints = NULL;
 
 const char *stopped_due_to_exception = "";
 std::vector<std::string> exceptions;
 
 tam::TamEmulator emulator;
 std::array<tam::TamAddr, 16> g_prev_registers = emulator.registers;
-std::vector<std::string> mnemonics;
 
 bool pref_highlight_changed_registers = true;
 bool pref_suspend_on_error            = true;
@@ -78,12 +77,14 @@ HANDLE sem_kick_the_emulator;
 
 // =====================================
 
-std::string wstring_to_utf8(const std::wstring& wstr) {
+std::string wstring_to_utf8(const std::wstring& wstr)
+{
     std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
     return conv.to_bytes(wstr);
 }
 
-std::wstring SelectFileDialog(HWND owner = NULL) {
+std::wstring SelectFileDialog(HWND owner = NULL)
+{
     std::wstring filePath;
 
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -131,79 +132,40 @@ std::wstring SelectFileDialog(HWND owner = NULL) {
     return filePath;
 }
 
-/// Load a TAM program from a file.
-///
-/// This function does not verify that the bytes read from the file form valid
-/// TAM bytecode.
-///
-/// @param filename name of file to read from
-/// @return a vector of 32-bit code words
-/// @throws std::runtime_error if the file did not contain a multiple of 4
-/// number of bytes
-std::vector<uint32_t> ReadProgramFromFile(const std::string& filename) {
-    std::ifstream in_stream(filename, std::ios::binary);
-
-    // find file size
-    in_stream.seekg(0, in_stream.end);
-    int file_len = in_stream.tellg();
-    in_stream.seekg(0, in_stream.beg);
-
-    if (file_len % 4 != 0)
-        throw tam::IoError("program file contained incomplete instruction");
-
-    // read instructions
-    std::vector<uint32_t> codes;
-    for (int j = 0; j < file_len / 4; ++j) {
-        int c;
-        uint32_t code = 0;
-        for (int i = 0; i < 4; ++i) {
-            c = in_stream.get();
-            code = (code << 8) | c;
-        }
-        codes.push_back(code);
-    }
-    return codes;
-}
-
-void StartSession(std::string filename) {
+void StartSession(std::string filename)
+{
     try {
-        g_current_program  = ReadProgramFromFile(filename);
+        size_t old_size    = emulator.program.size();
         g_current_filename = filename;
 
         DWORD wait = WaitForSingleObject(mutex_emulator, INFINITE);
         assert(wait == WAIT_OBJECT_0);
 
         emulator = tam::TamEmulator();
-        emulator.LoadProgram(g_current_program);
-        breakpoints = new bool[g_current_program.size()]();
+        emulator.LoadProgramFromFile(filename);
 
         assert(ReleaseMutex(mutex_emulator));
 
+        size_t new_size = emulator.program.size();
+        breakpoints = (bool *)realloc(breakpoints, new_size * sizeof(bool));
+        if (new_size > old_size)
+            memset(&breakpoints[old_size], false, (new_size - old_size) * sizeof(bool));
+
+        exceptions.clear();
+
         g_prev_registers = emulator.registers;
-        mnemonics.clear();
-        for (uint32_t code : g_current_program) {
-            uint8_t op = (code & 0xf0000000) >> 28;
-            assert(op <= 0xf);
-            uint8_t r = (code & 0x0f000000) >> 24;
-            assert(r <= 0xf);
-            uint8_t n = (code & 0x00ff0000) >> 16;
-            assert(n <= 0xff);
-            int16_t d = code & 0x0000ffff;
-            tam::TamInstruction ins = {op, r, n, d};
-            mnemonics.push_back(tam::GetMnemonic(ins));
-        }
+
     } catch (const std::exception& e) {
         std::cerr << e.what() << std::endl; // @ToDo tell the user this
-        //return 2;
     }
 }
 
-void RestartSession() {
+void RestartSession()
+{
     DWORD wait = WaitForSingleObject(mutex_emulator, INFINITE);
     assert(wait == WAIT_OBJECT_0);
 
-    emulator = tam::TamEmulator();
-    emulator.LoadProgram(g_current_program);
+    emulator.Reset();
 
     exceptions.clear();
     stopped_due_to_exception = "";
@@ -213,7 +175,8 @@ void RestartSession() {
     g_prev_registers = emulator.registers;
 }
 
-void Step() {
+void Step()
+{
     try {
         const tam::TamInstruction Instr = emulator.FetchDecode();
         emulator.Execute(Instr);
@@ -227,6 +190,17 @@ void Step() {
         exceptions.push_back(e.what());
 
         std::cerr << e.what() << std::endl;
+    }
+}
+
+static void HelpMarker(const char* desc)
+{
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+        ImGui::TextUnformatted(desc);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
     }
 }
 
@@ -333,7 +307,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                     }
                 }
                 if (ImGui::MenuItem("Reload")) {
-                    // @Todo this removes breakpoints
                     StartSession(g_current_filename);
                 }
                 // ShowExampleMenuFile();
@@ -359,36 +332,40 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                 ImGui::EndMenu();
             }
 
-            // --- Draw the colored rect in the remaining area ---
+            //
+            // Status Bar
+            //
+
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
-            // Current cursor (end of menu items)
-            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImVec2 screen_pos = ImGui::GetCursorScreenPos();
 
-            // End of the menu bar
-            ImVec2 end = ImGui::GetWindowPos();
-            end.x     += ImGui::GetWindowWidth();
-            end.y     += ImGui::GetWindowHeight();
+            ImVec2 menu_bar_end = ImGui::GetWindowPos();
+            menu_bar_end.x     += ImGui::GetWindowWidth();
+            menu_bar_end.y     += ImGui::GetWindowHeight();
 
             ImU32 colour_running   = IM_COL32(202,  81,  0, 255);
             ImU32 colour_suspended = IM_COL32(202, 131,  0, 255);
             ImU32 colour_success   = IM_COL32( 40, 202,  0, 255);
             ImU32 colour_error     = IM_COL32(137,  11, 11, 255);
 
-            // Status
             if (emulator.halted) {
-                draw_list->AddRectFilled(p, end, colour_success);
+                draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_success);
                 ImGui::Text("   Program halted");
             } else if (run_emulator) {
-                draw_list->AddRectFilled(p, end, colour_running);
+                draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_running);
                 ImGui::Text("   Executing");
             } else if (std::strlen(stopped_due_to_exception) > 0) {
-                draw_list->AddRectFilled(p, end, colour_error);
+                draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_error);
                 ImGui::Text("   Suspended: %s", stopped_due_to_exception);
             } else if (g_current_filename != "") {
-                draw_list->AddRectFilled(p, end, colour_suspended);
+                draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_suspended);
                 ImGui::Text("   Suspended");
             }
+
+            //
+            // End Status Bar
+            //
 
             ImGui::EndMainMenuBar();
         }
@@ -415,15 +392,13 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             ImGui::TableHeadersRow();
 
             ImGuiListClipper clipper;
-            clipper.Begin(mnemonics.size());
+            clipper.Begin(emulator.mnemonics.size());
 
             int hovered_row = ImGui::TableGetHoveredRow();
             static int select_hovered_row = -1;
 
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && hovered_row != -1) {
                 ImGui::OpenPopup("my_toggle_popup");
-                select_hovered_row = hovered_row - 1;
-                    //breakpoints[hovered_row - 1] = !breakpoints[hovered_row - 1];
             }
 
             if (ImGui::BeginPopup("my_toggle_popup")) {
@@ -432,26 +407,30 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                     emulator.registers[tam::CP] = select_hovered_row;
                     emulator.halted = false;
                 }
-
                 ImGui::EndPopup();
+            } else {
+                select_hovered_row = hovered_row - 1;
             }
 
             while (clipper.Step()) {
                 for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-                    std::string mnemonic = mnemonics[row];
+                    std::string mnemonic = emulator.mnemonics[row];
                     ImGui::TableNextRow();
 
-                    // Draw Breakpoint
-                    if (breakpoints[row]) {
-                        ImU32 breakpoint_colour = IM_COL32(170, 51, 79, 255);
-                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, breakpoint_colour);
-                    }
+                    ImU32 breakpoint_colour = IM_COL32(170,  51,  79, 255);
+                    ImU32 step_colour       = IM_COL32( 41, 105, 173, 255);
+                    ImU32 hovered_colour    = IM_COL32( 29,  29,  29, 255);
 
-                    // Draw Program Counter Instruction
-                    if (row == emulator.registers[tam::CP]) {
-                        ImU32 step_colour = IM_COL32(41, 105, 173, 255);
+                    bool hovered = row == select_hovered_row;
+                    if (hovered)
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, hovered_colour);
+
+                    if (breakpoints[row])
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, breakpoint_colour);
+
+                    bool program_counter = row == emulator.registers[tam::CP];
+                    if (program_counter)
                         ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, step_colour);
-                    }
 
                     ImGui::TableNextColumn();
                         ImGui::Text("%d", row);
@@ -466,11 +445,28 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
         ImGui::End();
 
-        ImGui::Begin("Output");
-        ImGui::Text("%s", emulator.output.c_str());
+        ImGuiWindowFlags output_window_flags = 0;
+        char *text = (char *)emulator.output.c_str(); // We can cast away the constness because the box is ReadOnly
+        bool has_output = std::strlen(text) > 0;
+        if (has_output)
+            output_window_flags |= ImGuiWindowFlags_UnsavedDocument;
+
+        ImGui::Begin("Output", NULL, output_window_flags);
+
+        // static char str0[128] = "Hello, world!";
+        // ImGui::InputText("Input", str0, IM_ARRAYSIZE(str0));
+
+        static ImGuiInputTextFlags flags = ImGuiInputTextFlags_ReadOnly;
+        ImGui::InputTextMultiline("##output", text, IM_ARRAYSIZE(text), ImVec2(-FLT_MIN, -FLT_MIN), flags);
+
         ImGui::End();
 
-        ImGui::Begin("Errors");
+        ImGuiWindowFlags errors_window_flags = 0;
+        bool has_errors = !exceptions.empty();
+        if (has_errors)
+            errors_window_flags |= ImGuiWindowFlags_UnsavedDocument;
+
+        ImGui::Begin("Errors", NULL, errors_window_flags);
         for (std::string error : exceptions)
             ImGui::Text("%s", error.c_str());
         ImGui::End();
@@ -586,7 +582,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     return 0;
 }
 
-DWORD WINAPI thread_func_run_emulator(LPVOID param) {
+DWORD WINAPI thread_func_run_emulator(LPVOID param)
+{
     while (true) {
         DWORD wait = WaitForSingleObject(mutex_emulator, INFINITE);
         assert(wait == WAIT_OBJECT_0);
@@ -732,7 +729,8 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return ::DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-BOOL SetDarkModeTitleBar(HWND hwnd, BOOL enable) {
+BOOL SetDarkModeTitleBar(HWND hwnd, BOOL enable)
+{
     BOOL dark = enable;
     return SUCCEEDED(DwmSetWindowAttribute(
         hwnd,

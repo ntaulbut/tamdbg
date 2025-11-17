@@ -198,14 +198,9 @@ class TamEmulator {
         }
     }
 
-    /// Sets the program to be run by this emulator.
-    ///
-    /// This method also sets `CT`, `PB`, `PT` based on the size of the program.
-    ///
-    /// @param program program code to load
-    /// @throws std::runtime_error if the provided program is too large to
-    /// fit in memory
-    void LoadProgram(const std::vector<TamCode>& program);
+    void Reset();
+
+    void LoadProgramFromFile(std::string filename);
 
     /// Obtains the next instruction to execute.
     ///
@@ -298,20 +293,22 @@ class TamEmulator {
     void PrimitiveNew();
     void PrimitiveDispose();
 
-    std::array<TamCode, kMemSize> code_store;  ///< Stores code words
-    std::array<TamData, kMemSize> data_store;  ///< Stores data words
-    std::array<TamAddr, 16> registers;         ///< Stores register values
+    std::vector<TamInstruction>   program;
+    std::array<TamData, kMemSize> data_store;
+    std::array<TamAddr, 16>       registers;
 
-    std::map<TamAddr, int>
-        allocated_blocks,  ///< Records blocks of heap memory in use
-        free_blocks;       ///< Records blocks of unused heap memory
+    std::vector<std::string> mnemonics;
 
-    FILE *instream,  ///< File that input is read from
-        *outstream;  ///< File that output is written to
+    std::map<TamAddr, int> allocated_blocks;
+    std::map<TamAddr, int> free_blocks;
+
+    FILE *instream;
+    FILE *outstream;
 
     bool halted = false;
 
     std::string output;
+    std::string input_queue;
 };
 
 /// Get Mnemonic of an instruction.
@@ -319,6 +316,8 @@ class TamEmulator {
 /// @param instr Instruction
 /// @return Mnemonic of Instruction
 std::string GetMnemonic(TamInstruction instr);
+
+TamInstruction Decode(uint32_t code);
 
 /// Make it so that `uint8_t`s added to string streams
 /// are treated as integers and not characters.

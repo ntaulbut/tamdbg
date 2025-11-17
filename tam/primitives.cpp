@@ -161,6 +161,7 @@ void TamEmulator::PrimitiveSub() {
     TamData arg2 = this->PopData(), arg1 = this->PopData();
     this->PushData(arg1 - arg2);
 }
+
 void TamEmulator::PrimitiveMult() {
     TamData arg2 = this->PopData(), arg1 = this->PopData();
     this->PushData(arg1 * arg2);
