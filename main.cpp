@@ -312,7 +312,6 @@ void RenderFrame()
     ImGui::PopStyleVar();
 
     ImGuiTableFlags flags = ImGuiTableFlags_Borders   |
-                            ImGuiTableFlags_Resizable |
                             ImGuiTableFlags_Hideable  |
                             ImGuiTableFlags_ScrollY   |
                             ImGuiTableFlags_ScrollX   |
@@ -430,7 +429,7 @@ void RenderFrame()
     ImGui::EndDisabled();
 
     for (int I = 0; I < emulator.registers[tam::ST]; ++I) {
-        ImGui::Text("%u", emulator.data_store[I]);
+        ImGui::Text("%d", emulator.data_store[I]);
     }
 
     ImGui::End();
