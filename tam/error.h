@@ -34,13 +34,10 @@ namespace tam {
 /// Enumerates all possible kinds of runtime error aside from I/O errors.
 ///
 enum class ExceptionKind {
-    kCodeAccessViolation,  ///< Attempt to access out-of-bounds address in
-                           ///< code memory
     kDataAccessViolation,  ///< Attempt to access out-of-bounds address in
                            ///< data memory
     kStackUnderflow,       ///< Stack attempted to grow into the heap
     kStackOverflow,        ///< Stack attempted to shrink past 0
-    kHeapOverflow,         ///< Heap attempted to grow into the stack
     kUnknownOpcode,        ///< An unrecognised opcode was given to execute
     kDivideByZero,         ///< There was an attempt to divide by 0
 };

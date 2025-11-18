@@ -23,6 +23,7 @@
 #include <fstream>
 #include <vector>
 #include <codecvt>
+#include <ranges>
 #include <locale>
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -429,13 +430,14 @@ void RenderFrame()
     ImGui::EndDisabled();
 
     for (int I = 0; I < emulator.registers[tam::ST]; ++I) {
-        ImGui::Text("%d", emulator.data_store[I]);
+        ImGui::Text("%u", emulator.data_store[I]);
     }
 
     ImGui::End();
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
     ImGui::Begin("Registers");
+    ImGui::PopStyleVar();
 
     static const char* TamRegisterNames[] = {
         "Code Base",
@@ -456,15 +458,18 @@ void RenderFrame()
         "Code Pointer"
     };
 
-    if (ImGui::BeginTable("RegistersTable", 2,
-                                        ImGuiTableFlags_Borders |
-                                        ImGuiTableFlags_RowBg |
-                                        //ImGuiTableFlags_Resizable |
-                                        // ImGuiTableFlags_Reorderable |
-                                        ImGuiTableFlags_ScrollY |
-                                        ImGuiTableFlags_ScrollX |
-                                        ImGuiTableFlags_SizingFixedFit
-                                        )) {
+    ImGuiTableFlags registers_table_flags = ImGuiTableFlags_Borders |
+                                            ImGuiTableFlags_RowBg   |
+                                            ImGuiTableFlags_ScrollY |
+                                            ImGuiTableFlags_ScrollX |
+                                            ImGuiTableFlags_SizingFixedFit;
+
+    if (ImGui::BeginTable("RegistersTable", 2, registers_table_flags)) {
+        ImGui::TableSetupColumn("Register");
+        ImGui::TableSetupColumn("Value");
+
+        ImGui::TableHeadersRow();
+
         for (int r = 0; r <= 15; r++) {
             ImGui::TableNextRow();
 
@@ -473,16 +478,53 @@ void RenderFrame()
 
             ImGui::TableNextColumn();
             if (g_prev_registers[r] != emulator.registers[r] && pref_highlight_changed_registers)
-                ImGui::TextColored(ImVec4(0.90f, 0.30f, 0.35f, 1.0f), "%d", emulator.registers[r]);
+                ImGui::TextColored(ImVec4(0.90f, 0.30f, 0.35f, 1.0f), "%u", emulator.registers[r]);
             else
-                ImGui::Text("%d", emulator.registers[r]);
+                ImGui::Text("%u", emulator.registers[r]);
         }
 
         ImGui::EndTable();
     }
 
     ImGui::End();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+    ImGui::Begin("Heap");
     ImGui::PopStyleVar();
+
+    ImGuiTableFlags heap_table_flags = ImGuiTableFlags_Borders |
+                                       ImGuiTableFlags_ScrollY |
+                                       ImGuiTableFlags_ScrollX |
+                                       ImGuiTableFlags_SizingFixedFit;
+
+    if (ImGui::BeginTable("Heap", 2, heap_table_flags)) {
+        ImGui::TableSetupColumn("Address");
+        ImGui::TableSetupColumn("Value");
+
+        ImGui::TableHeadersRow();
+
+        int block_num = 1;
+        for (auto Block : std::views::reverse(emulator.allocated_blocks)) {
+            for (int I = Block.second - 1; I >= 0; I--) {
+                ImGui::TableNextRow();
+
+                ImU32 even_block_colour = IM_COL32(29, 29, 29, 255);
+                bool  even_block        = block_num % 2 == 0;
+                if (even_block)
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, even_block_colour);
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", std::format("{:04X}", Block.first + I));
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", emulator.data_store[Block.first + I]);
+            }
+            block_num++;
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::End();
 
     ImGui::Render();
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
@@ -554,6 +596,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
     // Main loop
     bool window_should_close = false;
+
+    RenderFrame();
 
     // Show the window
     ::ShowWindow(hwnd, SW_SHOWDEFAULT);

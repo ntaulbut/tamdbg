@@ -29,14 +29,11 @@
 
 namespace tam {
 
+
 const std::runtime_error RuntimeError(ExceptionKind kind, uint16_t addr) {
     std::stringstream ss;
-    ss << "error: ";
 
     switch (kind) {
-        case ExceptionKind::kCodeAccessViolation:
-            ss << "code access violation";
-            break;
         case ExceptionKind::kDataAccessViolation:
             ss << "data access violation";
             break;
@@ -46,11 +43,9 @@ const std::runtime_error RuntimeError(ExceptionKind kind, uint16_t addr) {
         case ExceptionKind::kStackUnderflow:
             ss << "stack underflow";
             break;
-        case ExceptionKind::kHeapOverflow:
-            ss << "heap overflow";
-            break;
         case ExceptionKind::kUnknownOpcode:
             ss << "unknown opcode";
+            break;
         case tam::ExceptionKind::kDivideByZero:
             ss << "divide by zero";
             break;

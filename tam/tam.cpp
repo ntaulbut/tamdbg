@@ -29,6 +29,7 @@
 #include <stdio.h>
 
 #include <algorithm>
+#include <format>
 #include <iomanip>
 #include <sstream>
 #include <stack>
@@ -116,7 +117,7 @@ TamInstruction TamEmulator::FetchDecode()
 {
     TamAddr addr = this->registers[CP]++;
     if (addr >= this->registers[CT])
-        throw RuntimeError(ExceptionKind::kCodeAccessViolation, addr);
+        throw std::runtime_error(std::format("code access violation at loc {}: attempted to cycle", this->registers[CP] - 1));
 
     return this->program[addr];
 }
@@ -136,8 +137,7 @@ TamData TamEmulator::PopData()
 {
     TamAddr addr = this->registers[ST];
     if (this->registers[ST] == 0)
-        throw RuntimeError(ExceptionKind::kStackUnderflow,
-                           this->registers[CP] - 1);
+        throw RuntimeError(ExceptionKind::kStackUnderflow, this->registers[CP] - 1);
 
     this->registers[ST]--;
     return this->data_store[this->registers[ST]];
@@ -308,9 +308,9 @@ void TamEmulator::ExecuteStorei(TamInstruction instr)
 
 void TamEmulator::ExecuteCall(TamInstruction instr)
 {
-    if (this->registers[instr.r] + instr.d >= this->registers[CT])
-        throw RuntimeError(ExceptionKind::kCodeAccessViolation,
-                           this->registers[CP] - 1);
+    TamAddr call_address = this->registers[instr.r] + instr.d;
+    if (call_address >= this->registers[CT])
+        throw std::runtime_error(std::format("code access violation at loc {}: attempted to call function at loc {}", this->registers[CP] - 1, call_address));
 
     TamAddr static_link = this->registers[instr.n];
     assert(static_link < this->registers[ST]);
@@ -324,7 +324,7 @@ void TamEmulator::ExecuteCall(TamInstruction instr)
     this->PushData(return_addr);
 
     this->registers[LB] = this->registers[ST] - 3;
-    this->registers[CP] = this->registers[instr.r] + instr.d;
+    this->registers[CP] = call_address;
 }
 
 void TamEmulator::ExecuteCalli(TamInstruction instr)
@@ -334,8 +334,7 @@ void TamEmulator::ExecuteCalli(TamInstruction instr)
     assert(static_link < this->registers[ST]);
 
     if (call_address >= this->registers[CT])
-        throw RuntimeError(ExceptionKind::kCodeAccessViolation,
-                           this->registers[CP] - 1);
+        throw std::runtime_error(std::format("code access violation at loc {}: attempted to call function at loc {}", this->registers[CP] - 1, call_address));
 
     TamAddr dynamic_link = this->registers[LB];
     assert(dynamic_link < this->registers[ST]);
@@ -360,8 +359,7 @@ void TamEmulator::ExecuteReturn(TamInstruction instr)
     TamAddr dynamic_link = this->data_store[this->registers[LB] + 1];
     TamAddr return_addr = this->data_store[this->registers[LB] + 2];
     if (return_addr >= this->registers[CT])
-        throw RuntimeError(ExceptionKind::kCodeAccessViolation,
-                           this->registers[CP] - 1);
+        throw std::runtime_error(std::format("code access violation at loc {}: attempted to return to loc {}", this->registers[CP] - 1, return_addr));
 
     // pop stack frame
     while (this->registers[ST] > this->registers[LB]) this->PopData();
@@ -413,8 +411,7 @@ void TamEmulator::ExecuteJump(TamInstruction instr)
 {
     TamAddr addr = this->registers[instr.r] + instr.d;
     if (addr >= this->registers[CT])
-        throw RuntimeError(ExceptionKind::kCodeAccessViolation,
-                           this->registers[CP] - 1);
+        throw std::runtime_error(std::format("code access violation at loc {}: attempted to jump to loc {}", this->registers[CP] - 1, addr));
 
     this->registers[CP] = addr;
     assert(this->registers[CP] == addr);
@@ -424,8 +421,7 @@ void TamEmulator::ExecuteJumpi(TamInstruction instr)
 {
     TamAddr addr = this->PopData();
     if (addr >= this->registers[CT])
-        throw RuntimeError(ExceptionKind::kCodeAccessViolation,
-                           this->registers[CP] - 1);
+        throw std::runtime_error(std::format("code access violation at loc {}: attempted to jump to loc {}", this->registers[CP] - 1, addr));
 
     this->registers[CP] = addr;
     assert(this->registers[CP] == addr);
@@ -440,8 +436,7 @@ void TamEmulator::ExecuteJumpif(TamInstruction instr)
 
     TamAddr addr = this->registers[instr.r] + instr.d;
     if (addr >= this->registers[CT])
-        throw RuntimeError(ExceptionKind::kCodeAccessViolation,
-                           this->registers[CP] - 1);
+        throw std::runtime_error(std::format("code access violation at loc {}: attempted to jump to loc {}", this->registers[CP] - 1, addr));
 
     this->registers[CP] = addr;
     assert(this->registers[CP] == addr);
