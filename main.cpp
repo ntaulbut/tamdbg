@@ -56,7 +56,6 @@ BOOL SetDarkModeTitleBar(HWND hwnd, BOOL enable);
 
 bool g_Resizing = false;
 std::string g_current_filename = "";
-std::vector<tam::TamInstruction> g_current_program;
 bool* breakpoints = NULL;
 
 const char *stopped_due_to_exception = "";
@@ -204,6 +203,312 @@ static void HelpMarker(const char* desc)
     }
 }
 
+void RenderFrame()
+{
+    /* Handle window being minimized or screen locked
+    if (g_SwapChainOccluded && g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
+        ::Sleep(10);
+        continue;
+    }
+    g_SwapChainOccluded = false;*/
+
+    // Handle window resize (we don't resize directly in the WM_SIZE handler)
+    if (g_ResizeWidth != 0 && g_ResizeHeight != 0) {
+        CleanupRenderTarget();
+        g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+        g_ResizeWidth = g_ResizeHeight = 0;
+        CreateRenderTarget();
+    }
+
+    // Start the Dear ImGui frame
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    ImGui::DockSpaceOverViewport();
+
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Open...")) {
+                std::wstring filename = SelectFileDialog();
+                if (!filename.empty()) {
+                    //MessageBoxW(NULL, filename.c_str(), L"Selected Folder", MB_OK | MB_ICONINFORMATION);
+
+                    StartSession(wstring_to_utf8(filename));
+
+                    //std::string root_path;
+                    //int result = WideCharToMultiByte(CP_ACP, 0, filename.c_str(), -1, root_path, sizeof(root_path), NULL, NULL);
+                } else {
+                    //MessageBoxW(NULL, L"No folder selected or dialog canceled.", L"Info", MB_OK | MB_ICONEXCLAMATION);
+                }
+            }
+            if (ImGui::MenuItem("Reload")) {
+                StartSession(g_current_filename);
+            }
+            // ShowExampleMenuFile();
+            //if (ImGui::MenuItem("Undo", "CTRL+Z")) {}
+            //if (ImGui::MenuItem("Redo", "CTRL+Y", false, false)) {} // Disabled item
+            //ImGui::Separator();
+            //if (ImGui::MenuItem("Cut", "CTRL+X")) {}
+            //if (ImGui::MenuItem("Copy", "CTRL+C")) {}
+            //if (ImGui::MenuItem("Paste", "CTRL+V")) {}
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Control")) {
+            if (ImGui::MenuItem("Reset")) {
+                RestartSession();
+            }
+            //ImGui::ColorEdit4("Match Colour", (float*)&colour_match_text);
+            //ImGui::ColorEdit4("Line Colour", (float*)&colour_line_text);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Preferences")) {
+            ImGui::Checkbox("Highlight Changed Registers", &pref_highlight_changed_registers);
+            ImGui::Checkbox("Suspend on Error", &pref_suspend_on_error);
+            ImGui::EndMenu();
+        }
+
+        //
+        // Status Bar
+        //
+
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+        ImVec2 screen_pos = ImGui::GetCursorScreenPos();
+
+        ImVec2 menu_bar_end = ImGui::GetWindowPos();
+        menu_bar_end.x     += ImGui::GetWindowWidth();
+        menu_bar_end.y     += ImGui::GetWindowHeight();
+
+        ImU32 colour_running   = IM_COL32(202,  81,  0, 255);
+        ImU32 colour_suspended = IM_COL32(202, 131,  0, 255);
+        ImU32 colour_success   = IM_COL32( 40, 202,  0, 255);
+        ImU32 colour_error     = IM_COL32(137,  11, 11, 255);
+
+        if (emulator.halted) {
+            draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_success);
+            ImGui::Text("   Program halted");
+        } else if (run_emulator) {
+            draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_running);
+            ImGui::Text("   Executing");
+        } else if (std::strlen(stopped_due_to_exception) > 0) {
+            draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_error);
+            ImGui::Text("   Suspended: %s", stopped_due_to_exception);
+        } else if (g_current_filename != "") {
+            draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_suspended);
+            ImGui::Text("   Suspended");
+        }
+
+        //
+        // End Status Bar
+        //
+
+        ImGui::EndMainMenuBar();
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+    ImGui::Begin("Disassembly");
+    ImGui::PopStyleVar();
+
+    ImGuiTableFlags flags = ImGuiTableFlags_Borders   |
+                            ImGuiTableFlags_Resizable |
+                            ImGuiTableFlags_Hideable  |
+                            ImGuiTableFlags_ScrollY   |
+                            ImGuiTableFlags_ScrollX   |
+                            ImGuiTableFlags_SizingFixedFit;
+
+    if (ImGui::BeginTable("DisassemblyTable", 2, flags)) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+
+        ImGui::TableSetupColumn("LOC");
+        ImGui::TableSetupColumn("Instruction");
+
+        ImGui::TableHeadersRow();
+
+        ImGuiListClipper clipper;
+        clipper.Begin(emulator.mnemonics.size());
+
+        int hovered_row = ImGui::TableGetHoveredRow();
+        static int select_hovered_row = -1;
+
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && hovered_row != -1) {
+            ImGui::OpenPopup("my_toggle_popup");
+        }
+
+        if (ImGui::BeginPopup("my_toggle_popup")) {
+            ImGui::MenuItem("Breakpoint", "", &breakpoints[select_hovered_row]);
+            if (ImGui::MenuItem("Set Execution Point")) {
+                emulator.registers[tam::CP] = select_hovered_row;
+                emulator.halted = false;
+            }
+            ImGui::EndPopup();
+        } else {
+            select_hovered_row = hovered_row - 1;
+        }
+
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                std::string mnemonic = emulator.mnemonics[row];
+                ImGui::TableNextRow();
+
+                ImU32 breakpoint_colour = IM_COL32(170,  51,  79, 255);
+                ImU32 step_colour       = IM_COL32( 41, 105, 173, 255);
+                ImU32 hovered_colour    = IM_COL32( 29,  29,  29, 255);
+
+                bool hovered = row == select_hovered_row;
+                if (hovered)
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, hovered_colour);
+
+                if (breakpoints[row])
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, breakpoint_colour);
+
+                bool program_counter = row == emulator.registers[tam::CP];
+                if (program_counter)
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, step_colour);
+
+                ImGui::TableNextColumn();
+                    ImGui::Text("%d", row);
+                ImGui::TableNextColumn();
+                    ImGui::Text("%s", mnemonic.c_str());
+                //ImGui::Selectable(a.c_str(), &matched_lines[row].selected, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, 10));
+            }
+        }
+
+        ImGui::EndTable();
+    }
+
+    ImGui::End();
+
+    ImGuiWindowFlags output_window_flags = 0;
+    char *text = (char *)emulator.output.c_str(); // We can cast away the constness because the box is ReadOnly
+    bool has_output = std::strlen(text) > 0;
+    if (has_output)
+        output_window_flags |= ImGuiWindowFlags_UnsavedDocument;
+
+    ImGui::Begin("Output", NULL, output_window_flags);
+
+    // static char str0[128] = "Hello, world!";
+    // ImGui::InputText("Input", str0, IM_ARRAYSIZE(str0));
+
+    static ImGuiInputTextFlags input_text_flags = ImGuiInputTextFlags_ReadOnly;
+    ImGui::InputTextMultiline("##output", text, IM_ARRAYSIZE(text), ImVec2(-FLT_MIN, -FLT_MIN), input_text_flags);
+
+    ImGui::End();
+
+    ImGuiWindowFlags errors_window_flags = 0;
+    bool has_errors = !exceptions.empty();
+    if (has_errors)
+        errors_window_flags |= ImGuiWindowFlags_UnsavedDocument;
+
+    ImGui::Begin("Errors", NULL, errors_window_flags);
+    for (std::string error : exceptions)
+        ImGui::Text("%s", error.c_str());
+    ImGui::End();
+
+    ImGui::Begin("Stack");
+    bool instructions_left = emulator.registers[tam::CP] < emulator.registers[tam::CT];
+    ImGui::BeginDisabled(run_emulator);
+    if (ImGui::Button("Run")) {
+        if (emulator.halted || !instructions_left)
+            RestartSession();
+        ReleaseSemaphore(sem_kick_the_emulator, 1, NULL);
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!run_emulator);
+    if (ImGui::Button("Stop")) {
+        run_emulator = false;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(emulator.halted || !instructions_left || run_emulator);
+    if (ImGui::Button("Step")) {
+        g_prev_registers = emulator.registers;
+        Step();
+    }
+    ImGui::EndDisabled();
+
+    for (int I = 0; I < emulator.registers[tam::ST]; ++I) {
+        ImGui::Text("%d", emulator.data_store[I]);
+    }
+
+    ImGui::End();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+    ImGui::Begin("Registers");
+
+    static const char* TamRegisterNames[] = {
+        "Code Base",
+        "Code Top",
+        "Primitives Base",
+        "Primitives Top",
+        "Stack Base",
+        "Stack Top",
+        "Heap Base",
+        "Heap Top",
+        "Local Base",
+        "Local Base 1",
+        "Local Base 2",
+        "Local Base 3",
+        "Local Base 4",
+        "Local Base 5",
+        "Local Base 6",
+        "Code Pointer"
+    };
+
+    if (ImGui::BeginTable("RegistersTable", 2,
+                                        ImGuiTableFlags_Borders |
+                                        ImGuiTableFlags_RowBg |
+                                        //ImGuiTableFlags_Resizable |
+                                        // ImGuiTableFlags_Reorderable |
+                                        ImGuiTableFlags_ScrollY |
+                                        ImGuiTableFlags_ScrollX |
+                                        ImGuiTableFlags_SizingFixedFit
+                                        )) {
+        for (int r = 0; r <= 15; r++) {
+            ImGui::TableNextRow();
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%s", TamRegisterNames[r]);
+
+            ImGui::TableNextColumn();
+            if (g_prev_registers[r] != emulator.registers[r] && pref_highlight_changed_registers)
+                ImGui::TextColored(ImVec4(0.90f, 0.30f, 0.35f, 1.0f), "%d", emulator.registers[r]);
+            else
+                ImGui::Text("%d", emulator.registers[r]);
+        }
+
+        ImGui::EndTable();
+    }
+
+    ImGui::End();
+    ImGui::PopStyleVar();
+
+    ImGui::Render();
+    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    const float clear_color_with_alpha[4] = {
+        clear_color.x * clear_color.w,
+        clear_color.y * clear_color.w,
+        clear_color.z * clear_color.w,
+        clear_color.w
+    };
+    g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+    g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    // Update and Render additional Platform Windows
+    /*if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+        ImGui::UpdatePlatformWindows();
+        ImGui::RenderPlatformWindowsDefault();
+    }*/
+
+    // Present
+    bool vsync = true;
+    HRESULT hr = g_pSwapChain->Present(vsync, 0);
+
+    g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
+}
+
 // Main code
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
@@ -221,10 +526,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return 1;
     }
-
-    // Show the window
-    ::ShowWindow(hwnd, SW_SHOWDEFAULT);
-    ::UpdateWindow(hwnd);
 
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
@@ -251,10 +552,12 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
     io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\segoeui.ttf", 18.0f);
 
-    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
-
     // Main loop
     bool window_should_close = false;
+
+    // Show the window
+    ::ShowWindow(hwnd, SW_SHOWDEFAULT);
+    ::UpdateWindow(hwnd);
 
     while (!window_should_close) {
         // Poll and handle messages (inputs, window resize, etc.)
@@ -269,305 +572,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         if (window_should_close)
             break;
 
-        // Handle window being minimized or screen locked
-        if (g_SwapChainOccluded && g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
-            ::Sleep(10);
-            continue;
-        }
-        g_SwapChainOccluded = false;
-
-        // Handle window resize (we don't resize directly in the WM_SIZE handler)
-        if (g_ResizeWidth != 0 && g_ResizeHeight != 0) {
-            CleanupRenderTarget();
-            g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
-            g_ResizeWidth = g_ResizeHeight = 0;
-            CreateRenderTarget();
-        }
-
-        // Start the Dear ImGui frame
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-
-        ImGui::DockSpaceOverViewport();
-
-        if (ImGui::BeginMainMenuBar()) {
-            if (ImGui::BeginMenu("File")) {
-                if (ImGui::MenuItem("Open...")) {
-                    std::wstring filename = SelectFileDialog();
-                    if (!filename.empty()) {
-                        //MessageBoxW(NULL, filename.c_str(), L"Selected Folder", MB_OK | MB_ICONINFORMATION);
-
-                        StartSession(wstring_to_utf8(filename));
-
-                        //std::string root_path;
-                        //int result = WideCharToMultiByte(CP_ACP, 0, filename.c_str(), -1, root_path, sizeof(root_path), NULL, NULL);
-                    } else {
-                        //MessageBoxW(NULL, L"No folder selected or dialog canceled.", L"Info", MB_OK | MB_ICONEXCLAMATION);
-                    }
-                }
-                if (ImGui::MenuItem("Reload")) {
-                    StartSession(g_current_filename);
-                }
-                // ShowExampleMenuFile();
-                //if (ImGui::MenuItem("Undo", "CTRL+Z")) {}
-                //if (ImGui::MenuItem("Redo", "CTRL+Y", false, false)) {} // Disabled item
-                //ImGui::Separator();
-                //if (ImGui::MenuItem("Cut", "CTRL+X")) {}
-                //if (ImGui::MenuItem("Copy", "CTRL+C")) {}
-                //if (ImGui::MenuItem("Paste", "CTRL+V")) {}
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu("Control")) {
-                if (ImGui::MenuItem("Reset")) {
-                    RestartSession();
-                }
-                //ImGui::ColorEdit4("Match Colour", (float*)&colour_match_text);
-                //ImGui::ColorEdit4("Line Colour", (float*)&colour_line_text);
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu("Preferences")) {
-                ImGui::Checkbox("Highlight Changed Registers", &pref_highlight_changed_registers);
-                ImGui::Checkbox("Suspend on Error", &pref_suspend_on_error);
-                ImGui::EndMenu();
-            }
-
-            //
-            // Status Bar
-            //
-
-            ImDrawList* draw_list = ImGui::GetWindowDrawList();
-
-            ImVec2 screen_pos = ImGui::GetCursorScreenPos();
-
-            ImVec2 menu_bar_end = ImGui::GetWindowPos();
-            menu_bar_end.x     += ImGui::GetWindowWidth();
-            menu_bar_end.y     += ImGui::GetWindowHeight();
-
-            ImU32 colour_running   = IM_COL32(202,  81,  0, 255);
-            ImU32 colour_suspended = IM_COL32(202, 131,  0, 255);
-            ImU32 colour_success   = IM_COL32( 40, 202,  0, 255);
-            ImU32 colour_error     = IM_COL32(137,  11, 11, 255);
-
-            if (emulator.halted) {
-                draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_success);
-                ImGui::Text("   Program halted");
-            } else if (run_emulator) {
-                draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_running);
-                ImGui::Text("   Executing");
-            } else if (std::strlen(stopped_due_to_exception) > 0) {
-                draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_error);
-                ImGui::Text("   Suspended: %s", stopped_due_to_exception);
-            } else if (g_current_filename != "") {
-                draw_list->AddRectFilled(screen_pos, menu_bar_end, colour_suspended);
-                ImGui::Text("   Suspended");
-            }
-
-            //
-            // End Status Bar
-            //
-
-            ImGui::EndMainMenuBar();
-        }
-
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
-        ImGui::Begin("Disassembly");
-        ImGui::PopStyleVar();
-
-        if (ImGui::BeginTable("DisassemblyTable", 2,
-                                            ImGuiTableFlags_Borders |
-                                            //ImGuiTableFlags_RowBg |
-                                            ImGuiTableFlags_Resizable |
-                                            ImGuiTableFlags_Hideable |
-                                            // ImGuiTableFlags_Reorderable |
-                                            ImGuiTableFlags_ScrollY |
-                                            ImGuiTableFlags_ScrollX |
-                                            ImGuiTableFlags_SizingFixedFit
-                                            )) {
-            ImGui::TableSetupScrollFreeze(0, 1);
-
-            ImGui::TableSetupColumn("LOC");
-            ImGui::TableSetupColumn("Instruction");
-
-            ImGui::TableHeadersRow();
-
-            ImGuiListClipper clipper;
-            clipper.Begin(emulator.mnemonics.size());
-
-            int hovered_row = ImGui::TableGetHoveredRow();
-            static int select_hovered_row = -1;
-
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && hovered_row != -1) {
-                ImGui::OpenPopup("my_toggle_popup");
-            }
-
-            if (ImGui::BeginPopup("my_toggle_popup")) {
-                ImGui::MenuItem("Breakpoint", "", &breakpoints[select_hovered_row]);
-                if (ImGui::MenuItem("Set Execution Point")) {
-                    emulator.registers[tam::CP] = select_hovered_row;
-                    emulator.halted = false;
-                }
-                ImGui::EndPopup();
-            } else {
-                select_hovered_row = hovered_row - 1;
-            }
-
-            while (clipper.Step()) {
-                for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-                    std::string mnemonic = emulator.mnemonics[row];
-                    ImGui::TableNextRow();
-
-                    ImU32 breakpoint_colour = IM_COL32(170,  51,  79, 255);
-                    ImU32 step_colour       = IM_COL32( 41, 105, 173, 255);
-                    ImU32 hovered_colour    = IM_COL32( 29,  29,  29, 255);
-
-                    bool hovered = row == select_hovered_row;
-                    if (hovered)
-                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, hovered_colour);
-
-                    if (breakpoints[row])
-                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, breakpoint_colour);
-
-                    bool program_counter = row == emulator.registers[tam::CP];
-                    if (program_counter)
-                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, step_colour);
-
-                    ImGui::TableNextColumn();
-                        ImGui::Text("%d", row);
-                    ImGui::TableNextColumn();
-                        ImGui::Text("%s", mnemonic.c_str());
-                    //ImGui::Selectable(a.c_str(), &matched_lines[row].selected, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, 10));
-                }
-            }
-
-            ImGui::EndTable();
-        }
-
-        ImGui::End();
-
-        ImGuiWindowFlags output_window_flags = 0;
-        char *text = (char *)emulator.output.c_str(); // We can cast away the constness because the box is ReadOnly
-        bool has_output = std::strlen(text) > 0;
-        if (has_output)
-            output_window_flags |= ImGuiWindowFlags_UnsavedDocument;
-
-        ImGui::Begin("Output", NULL, output_window_flags);
-
-        // static char str0[128] = "Hello, world!";
-        // ImGui::InputText("Input", str0, IM_ARRAYSIZE(str0));
-
-        static ImGuiInputTextFlags flags = ImGuiInputTextFlags_ReadOnly;
-        ImGui::InputTextMultiline("##output", text, IM_ARRAYSIZE(text), ImVec2(-FLT_MIN, -FLT_MIN), flags);
-
-        ImGui::End();
-
-        ImGuiWindowFlags errors_window_flags = 0;
-        bool has_errors = !exceptions.empty();
-        if (has_errors)
-            errors_window_flags |= ImGuiWindowFlags_UnsavedDocument;
-
-        ImGui::Begin("Errors", NULL, errors_window_flags);
-        for (std::string error : exceptions)
-            ImGui::Text("%s", error.c_str());
-        ImGui::End();
-
-        ImGui::Begin("Stack");
-        bool instructions_left = emulator.registers[tam::CP] < emulator.registers[tam::CT];
-        ImGui::BeginDisabled(run_emulator);
-        if (ImGui::Button("Run")) {
-            if (emulator.halted || !instructions_left)
-                RestartSession();
-            ReleaseSemaphore(sem_kick_the_emulator, 1, NULL);
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!run_emulator);
-        if (ImGui::Button("Stop")) {
-            run_emulator = false;
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::BeginDisabled(emulator.halted || !instructions_left || run_emulator);
-        if (ImGui::Button("Step")) {
-            g_prev_registers = emulator.registers;
-            Step();
-        }
-        ImGui::EndDisabled();
-
-        for (int I = 0; I < emulator.registers[tam::ST]; ++I) {
-            ImGui::Text("%d", emulator.data_store[I]);
-        }
-
-        ImGui::End();
-
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
-        ImGui::Begin("Registers");
-
-        static const char* TamRegisterNames[] = {
-            "Code Base",
-            "Code Top",
-            "Primitives Base",
-            "Primitives Top",
-            "Stack Base",
-            "Stack Top",
-            "Heap Base",
-            "Heap Top",
-            "Local Base",
-            "Local Base 1",
-            "Local Base 2",
-            "Local Base 3",
-            "Local Base 4",
-            "Local Base 5",
-            "Local Base 6",
-            "Code Pointer"
-        };
-
-        if (ImGui::BeginTable("RegistersTable", 2,
-                                            ImGuiTableFlags_Borders |
-                                            ImGuiTableFlags_RowBg |
-                                            //ImGuiTableFlags_Resizable |
-                                            // ImGuiTableFlags_Reorderable |
-                                            ImGuiTableFlags_ScrollY |
-                                            ImGuiTableFlags_ScrollX |
-                                            ImGuiTableFlags_SizingFixedFit
-                                            )) {
-            for (int r = 0; r <= 15; r++) {
-                ImGui::TableNextRow();
-
-                ImGui::TableNextColumn();
-                ImGui::Text("%s", TamRegisterNames[r]);
-
-                ImGui::TableNextColumn();
-                if (g_prev_registers[r] != emulator.registers[r] && pref_highlight_changed_registers)
-                    ImGui::TextColored(ImVec4(0.90f, 0.30f, 0.35f, 1.0f), "%d", emulator.registers[r]);
-                else
-                    ImGui::Text("%d", emulator.registers[r]);
-            }
-
-            ImGui::EndTable();
-        }
-
-        ImGui::End();
-        ImGui::PopStyleVar();
-
         // Rendering
-        ImGui::Render();
-        const float clear_color_with_alpha[4] = { clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w };
-        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-        // Update and Render additional Platform Windows
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
-            ImGui::UpdatePlatformWindows();
-            ImGui::RenderPlatformWindowsDefault();
-        }
-
-        // Present
-        bool vsync = true;
-        HRESULT hr = g_pSwapChain->Present(vsync, 0);
-
-        g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
+        RenderFrame();
     }
 
     // Cleanup
@@ -703,6 +709,8 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_pSwapChain->ResizeBuffers(0, LOWORD(lParam), HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
             CreateRenderTarget();   // recreate RTs
         }
+
+        RenderFrame();
         return 0;
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU) // Disable ALT application menu
