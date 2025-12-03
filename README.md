@@ -1,4 +1,4 @@
-# TAMdbg
+# <img width="32" height="32" alt="Logo" src="https://github.com/user-attachments/assets/970293f7-0fac-4a18-a204-f58a091bd181" /> TAMdbg
 
 <img width="1287" height="815" alt="Screenshot 2025-11-16 073946" src="https://github.com/user-attachments/assets/e624619a-c662-4a2d-9cbf-9e2b64f3808d" />
 
